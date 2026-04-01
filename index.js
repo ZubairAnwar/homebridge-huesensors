@@ -1,161 +1,147 @@
 'use strict';
-var Service, Characteristic;
-let huejay = require('huejay');
+
+const huejay = require('huejay');
+
+/**
+ * Homebridge v1.6+ / v2.x compatible plugin registration.
+ *
+ * Key changes from the original (2017) code:
+ *  - module.exports now receives the `api` object, not the legacy `homebridge` shim
+ *  - registerAccessory() takes 2 args (accessory name + class), not 3
+ *  - Service and Characteristic are obtained from api.hap inside the constructor
+ *  - Constructor accepts (log, config, api) — the third arg is new
+ *  - Converted to ES6 class for clarity (optional but recommended)
+ */
+module.exports = (api) => {
+    api.registerAccessory('HueSensors', HueSensorsAccessory);
+};
 
 
-module.exports = function (homebridge) {
-    Service = homebridge.hap.Service;
-    Characteristic = homebridge.hap.Characteristic;
-    homebridge.registerAccessory("homebridge-huesensors", "HueSensors", HueSensorsAccessory);
-}
+class HueSensorsAccessory {
 
+    constructor(log, config, api) {
+        this.log    = log;
+        this.config = config;
+        this.api    = api;
 
-function HueSensorsAccessory(log, config) {
-    this.log = log;
-    this.filter = config["filter"];
-    this.clients = [];
-    for (let bridge of config["bridges"]) {
+        // In the new API, Service and Characteristic live on api.hap
+        this.Service        = api.hap.Service;
+        this.Characteristic = api.hap.Characteristic;
 
-        var newBridge = new huejay.Client({
-            host: bridge.IP,
-            port: 80,               // Optional
-            username: bridge.username,
-            timeout: 15000,            // Optional, timeout in milliseconds (15000 is the default)
-        });
+        this.filter  = config['filter'];
+        this.clients = [];
 
-        this.clients.push(newBridge);
-
+        for (const bridge of config['bridges']) {
+            const newBridge = new huejay.Client({
+                host:     bridge.IP,
+                port:     80,
+                username: bridge.username,
+                timeout:  15000,
+            });
+            this.clients.push(newBridge);
+        }
     }
 
-}
 
-HueSensorsAccessory.prototype = {
+    // ─── Private helpers ────────────────────────────────────────────────────────
 
-    setState: function (state) {
-        for (let client of this.clients) {
-
+    setState(state) {
+        for (const client of this.clients) {
             client.sensors.getAll()
                 .then(sensors => {
-                    for (let sensor of sensors) {
-
-                        //only check for sensors specified in the config
+                    for (const sensor of sensors) {
                         if (this.filter.indexOf(sensor.name) > -1) {
-
-                            if (sensor.type == "ZLLPresence") {
-
+                            if (sensor.type === 'ZLLPresence') {
                                 sensor.config.on = state;
                                 client.sensors.save(sensor);
-
                                 this.log(`Sensor [${sensor.id}]: ${sensor.name} On: ${sensor.config.on}`);
-
                             }
                         }
                     }
                 })
                 .catch(error => {
-                    console.log(error.stack);
+                    this.log.error(error.stack);
                 });
         }
-    },
+    }
 
-    checkBridges: function (callback) {
-        
-        var promises = [];
-        
-        for (let client of this.clients) {
+    checkBridges(callback) {
+        const promises = [];
 
+        for (const client of this.clients) {
             promises.push(new Promise((resolve, reject) => {
-                
-                var sensorsON = true;
+                let sensorsON = true;
+
                 client.sensors.getAll()
                     .then(sensors => {
-                        for (let sensor of sensors) {
-
-                            //only check for sensors specified in the config
+                        for (const sensor of sensors) {
                             if (this.filter.indexOf(sensor.name) > -1) {
-
-                                if (sensor.type == "ZLLPresence") {
-
+                                if (sensor.type === 'ZLLPresence') {
                                     this.log(`Sensor [${sensor.id}]: ${sensor.name} On: ${sensor.config.on}`);
-
-                                    //at least one sensor is off, so return off
-                                    if (sensor.config.on == false) {
+                                    if (sensor.config.on === false) {
                                         sensorsON = false;
-                                        this.log("A sensor is OFF: " + sensor.name);
+                                        this.log('A sensor is OFF: ' + sensor.name);
                                     }
-
                                 }
                             }
                         }
-
-                        //this.log("finished bridge: " + client.username);
                         resolve(sensorsON);
-
                     })
                     .catch(error => {
-                        console.log(error.stack);
+                        this.log.error(error.stack);
                         reject(error.stack);
                     });
-                
             }));
-
         }
 
         Promise.all(promises).then(values => {
+            callback(values.indexOf(false) === -1);
+        });
+    }
 
-            if (values.indexOf(false) > -1) {
-                callback(false);
-            } else {
-                callback(true);
-            }
 
-        })
+    // ─── Characteristic handlers ─────────────────────────────────────────────
 
-    },
-
-    getPowerState: function (callback) {
-        this.checkBridges(function (retval) {
+    getPowerState(callback) {
+        this.checkBridges(retval => {
             if (retval) {
-                console.log("all on");
+                this.log('All sensors on');
                 callback(null, 1);
             } else {
-                console.log("at least one off");
+                this.log('At least one sensor off');
                 callback(null, 0);
             }
         });
-    },
+    }
 
-    setPowerState: function (powerOn, callback) {
-        if (powerOn) {
-            //turn on
-            this.setState(true);
-            callback();
-        } else {
-            //turn off
-            this.setState(false);
-            callback();
-        }
-    },
+    setPowerState(powerOn, callback) {
+        this.setState(powerOn);
+        callback();
+    }
+
+    identify(callback) {
+        this.log('Identify requested!');
+        callback();
+    }
 
 
-    identify: function (callback) {
-        this.log("Identify requested!");
-        callback(); // success
-    },
+    // ─── Homebridge lifecycle ────────────────────────────────────────────────
 
-    getServices: function () {
-        var informationService = new Service.AccessoryInformation();
+    getServices() {
+        const { Service, Characteristic } = this;
+
+        const informationService = new Service.AccessoryInformation();
         informationService
-            .setCharacteristic(Characteristic.Manufacturer, "HueSensors Manufacturer")
-            .setCharacteristic(Characteristic.Model, "HueSensors Model")
-            .setCharacteristic(Characteristic.SerialNumber, "HueSensors Serial Number");
+            .setCharacteristic(Characteristic.Manufacturer, 'HueSensors Manufacturer')
+            .setCharacteristic(Characteristic.Model,        'HueSensors Model')
+            .setCharacteristic(Characteristic.SerialNumber, 'HueSensors Serial Number');
 
-        var switchService = new Service.Switch(this.name);
+        const switchService = new Service.Switch(this.config.name || 'Hue Sensors');
         switchService
             .getCharacteristic(Characteristic.On)
             .on('get', this.getPowerState.bind(this))
             .on('set', this.setPowerState.bind(this));
 
-        return [switchService];
+        return [informationService, switchService];
     }
-};
+}

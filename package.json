@@ -1,13 +1,14 @@
 {
   "name": "homebridge-huesensors",
-  "version": "0.0.7",
+  "version": "0.1.0",
   "description": "HueSensors for homebridge",
+  "main": "index.js",
   "keywords": [
     "homebridge-plugin"
   ],
   "engines": {
-    "node": ">=0.12.0",
-    "homebridge": ">=0.2.0"
+    "node": "^18.20.4 || ^20.15.1 || ^22.0.0",
+    "homebridge": "^1.6.0 || ^2.0.0"
   },
   "author": {
     "name": "steedferns"
