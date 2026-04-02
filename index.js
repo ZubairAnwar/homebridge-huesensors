@@ -2,6 +2,8 @@
 
 const https = require('https');
 
+// The Hue Bridge uses a self-signed TLS certificate. We create a dedicated
+// agent that skips verification, used only for requests in this plugin.
 const hueAgent = new https.Agent({ rejectUnauthorized: false });
 
 module.exports = (api) => {
@@ -19,12 +21,8 @@ class HueSensorsAccessory {
         this.Service        = api.hap.Service;
         this.Characteristic = api.hap.Characteristic;
 
-        this.filter  = config['filter'];
-        this.bridges = config['bridges'];
-
-        // DEBUG: log what we received from config at startup
-        this.log(`DEBUG filter: ${JSON.stringify(this.filter)}`);
-        this.log(`DEBUG bridges: ${JSON.stringify(this.bridges.map(b => ({ IP: b.IP, keyLength: b.username?.length })))}`);
+        this.filter  = config['filter'];   // e.g. ["Living Room Sensor"]
+        this.bridges = config['bridges'];  // e.g. [{IP, username}]
     }
 
 
@@ -51,8 +49,6 @@ class HueSensorsAccessory {
                 let raw = '';
                 res.on('data', chunk => raw += chunk);
                 res.on('end', () => {
-                    // DEBUG: log raw HTTP status and first 200 chars of response
-                    this.log(`DEBUG ${method} ${path} → HTTP ${res.statusCode} — ${raw.substring(0, 200)}`);
                     try {
                         const parsed = JSON.parse(raw);
                         if (parsed.errors && parsed.errors.length > 0) {
@@ -78,24 +74,14 @@ class HueSensorsAccessory {
             this.hueRequest(bridge, 'GET', '/resource/motion'),
         ]);
 
-        // DEBUG: log counts and a sample of device names
-        this.log(`DEBUG devices returned: ${devices.length}`);
-        this.log(`DEBUG motions returned: ${motions.length}`);
-
         const deviceNames = {};
         for (const device of devices) {
             deviceNames[device.id] = device.metadata?.name;
         }
 
-        // DEBUG: log only the sensor-related devices
-        const sensorEntries = Object.entries(deviceNames).filter(([, n]) => n && n.includes('Sensor'));
-        this.log(`DEBUG sensor devices: ${JSON.stringify(sensorEntries)}`);
-
         const matched = [];
         for (const motion of motions) {
             const ownerName = deviceNames[motion.owner?.rid];
-            // DEBUG: log each motion sensor lookup result
-            this.log(`DEBUG motion ${motion.id}: owner rid=${motion.owner?.rid} → name="${ownerName}" — filter match=${this.filter.includes(ownerName)}`);
             if (ownerName && this.filter.includes(ownerName)) {
                 matched.push({
                     bridge,
@@ -105,8 +91,6 @@ class HueSensorsAccessory {
                 });
             }
         }
-
-        this.log(`DEBUG matched sensors: ${matched.length}`);
         return matched;
     }
 
