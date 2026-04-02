@@ -1,28 +1,11 @@
 'use strict';
 
-// FIX 1: The Hue bridge uses a self-signed TLS certificate. Newer Node.js
-// versions reject these by default, causing "unable to verify the first
-// certificate". This tells Node.js to allow them for requests made by this
-// plugin. Scoped here at module load rather than globally on the process.
 const https = require('https');
-const httpsAgent = new https.Agent({ rejectUnauthorized: false });
-// huejay uses axios under the hood; patch the default agent it will pick up.
-https.globalAgent = httpsAgent;
 
-const huejay = require('huejay');
+// The Hue Bridge uses a self-signed TLS certificate. We create a dedicated
+// agent that skips verification, used only for requests in this plugin.
+const hueAgent = new https.Agent({ rejectUnauthorized: false });
 
-/**
- * Homebridge v1.6+ / v2.x compatible plugin registration.
- *
- * Key changes from the original (2017) code:
- *  - module.exports now receives the `api` object, not the legacy `homebridge` shim
- *  - registerAccessory() takes 2 args (accessory name + class), not 3
- *  - Service and Characteristic are obtained from api.hap inside the constructor
- *  - Constructor accepts (log, config, api) — the third arg is new
- *  - Converted to ES6 class for clarity (optional but recommended)
- *  - FIX 1: TLS certificate verification disabled for self-signed Hue bridge cert
- *  - FIX 2: Promise.all() now has a .catch() to prevent UnhandledPromiseRejection
- */
 module.exports = (api) => {
     api.registerAccessory('HueSensors', HueSensorsAccessory);
 };
@@ -35,121 +18,87 @@ class HueSensorsAccessory {
         this.config = config;
         this.api    = api;
 
-        // In the new API, Service and Characteristic live on api.hap
         this.Service        = api.hap.Service;
         this.Characteristic = api.hap.Characteristic;
 
-        this.filter  = config['filter'];
-        this.clients = [];
-
-        for (const bridge of config['bridges']) {
-            const newBridge = new huejay.Client({
-                host:     bridge.IP,
-                port:     80,
-                username: bridge.username,
-                timeout:  15000,
-            });
-            this.clients.push(newBridge);
-        }
+        this.filter  = config['filter'];   // e.g. ["Living Room Sensor"]
+        this.bridges = config['bridges'];  // e.g. [{IP, username}]
     }
 
 
-    // ─── Private helpers ────────────────────────────────────────────────────────
+    // ─── Hue API v2 helpers ──────────────────────────────────────────────────
 
-    setState(state) {
-        for (const client of this.clients) {
-            client.sensors.getAll()
-                .then(sensors => {
-                    for (const sensor of sensors) {
-                        if (this.filter.indexOf(sensor.name) > -1) {
-                            if (sensor.type === 'ZLLPresence') {
-                                sensor.config.on = state;
-                                // FIX 3: .catch() added to sensors.save() — without this,
-                                // a rejection from the Hue bridge (e.g. Hue Bridge 2
-                                // blocking v1 API config writes) is an unhandled rejection
-                                // that crashes the child bridge process.
-                                client.sensors.save(sensor)
-                                    .then(() => {
-                                        this.log(`Sensor [${sensor.id}]: ${sensor.name} On: ${sensor.config.on}`);
-                                    })
-                                    .catch(error => {
-                                        this.log.error(`Failed to save sensor [${sensor.id}] ${sensor.name}: ${error.message}`);
-                                    });
-                            }
+    hueRequest(bridge, method, path, body = null) {
+        return new Promise((resolve, reject) => {
+            const bodyStr = body ? JSON.stringify(body) : null;
+
+            const options = {
+                hostname: bridge.IP,
+                port:     443,
+                path:     `/clip/v2${path}`,
+                method:   method,
+                headers:  {
+                    'hue-application-key': bridge.username,
+                    'Content-Type':        'application/json',
+                    ...(bodyStr ? { 'Content-Length': Buffer.byteLength(bodyStr) } : {}),
+                },
+                agent: hueAgent,
+            };
+
+            const req = https.request(options, (res) => {
+                let raw = '';
+                res.on('data', chunk => raw += chunk);
+                res.on('end', () => {
+                    try {
+                        const parsed = JSON.parse(raw);
+                        if (parsed.errors && parsed.errors.length > 0) {
+                            reject(new Error(parsed.errors[0].description));
+                        } else {
+                            resolve(parsed.data || []);
                         }
+                    } catch (e) {
+                        reject(new Error(`Failed to parse bridge response: ${raw}`));
                     }
-                })
-                .catch(error => {
-                    this.log.error(error.stack);
                 });
-        }
-    }
-
-    checkBridges(callback) {
-        const promises = [];
-
-        for (const client of this.clients) {
-            promises.push(new Promise((resolve, reject) => {
-                let sensorsON = true;
-
-                client.sensors.getAll()
-                    .then(sensors => {
-                        for (const sensor of sensors) {
-                            if (this.filter.indexOf(sensor.name) > -1) {
-                                if (sensor.type === 'ZLLPresence') {
-                                    this.log(`Sensor [${sensor.id}]: ${sensor.name} On: ${sensor.config.on}`);
-                                    if (sensor.config.on === false) {
-                                        sensorsON = false;
-                                        this.log('A sensor is OFF: ' + sensor.name);
-                                    }
-                                }
-                            }
-                        }
-                        resolve(sensorsON);
-                    })
-                    .catch(error => {
-                        this.log.error(error.stack);
-                        reject(error.stack);
-                    });
-            }));
-        }
-
-        // FIX 2: .catch() added here to handle rejections from any individual
-        // bridge promise (e.g. SSL errors, network timeouts). Without this,
-        // Node.js v15+ throws an UnhandledPromiseRejection and crashes.
-        Promise.all(promises)
-            .then(values => {
-                callback(values.indexOf(false) === -1);
-            })
-            .catch(error => {
-                this.log.error('Error checking bridges: ' + error);
-                callback(false);
             });
-    }
 
-
-    // ─── Characteristic handlers ─────────────────────────────────────────────
-
-    getPowerState(callback) {
-        this.checkBridges(retval => {
-            if (retval) {
-                this.log('All sensors on');
-                callback(null, 1);
-            } else {
-                this.log('At least one sensor off');
-                callback(null, 0);
-            }
+            req.on('error', reject);
+            if (bodyStr) req.write(bodyStr);
+            req.end();
         });
     }
 
-    setPowerState(powerOn, callback) {
-        this.setState(powerOn);
-        callback();
+    async getFilteredMotionSensors(bridge) {
+        const [devices, motions] = await Promise.all([
+            this.hueRequest(bridge, 'GET', '/resource/device'),
+            this.hueRequest(bridge, 'GET', '/resource/motion'),
+        ]);
+
+        const deviceNames = {};
+        for (const device of devices) {
+            deviceNames[device.id] = device.metadata?.name;
+        }
+
+        const matched = [];
+        for (const motion of motions) {
+            const ownerName = deviceNames[motion.owner?.rid];
+            if (ownerName && this.filter.includes(ownerName)) {
+                matched.push({
+                    bridge,
+                    motionId: motion.id,
+                    name:     ownerName,
+                    enabled:  motion.enabled,
+                });
+            }
+        }
+        return matched;
     }
 
-    identify(callback) {
-        this.log('Identify requested!');
-        callback();
+    async getAllFilteredMotionSensors() {
+        const results = await Promise.all(
+            this.bridges.map(bridge => this.getFilteredMotionSensors(bridge))
+        );
+        return results.flat();
     }
 
 
@@ -160,15 +109,53 @@ class HueSensorsAccessory {
 
         const informationService = new Service.AccessoryInformation();
         informationService
-            .setCharacteristic(Characteristic.Manufacturer, 'HueSensors Manufacturer')
-            .setCharacteristic(Characteristic.Model,        'HueSensors Model')
-            .setCharacteristic(Characteristic.SerialNumber, 'HueSensors Serial Number');
+            .setCharacteristic(Characteristic.Manufacturer, 'Signify')
+            .setCharacteristic(Characteristic.Model,        'Hue Motion Sensor')
+            .setCharacteristic(Characteristic.SerialNumber, 'homebridge-huesensors');
 
         const switchService = new Service.Switch(this.config.name || 'Hue Sensors');
-        switchService
-            .getCharacteristic(Characteristic.On)
-            .on('get', this.getPowerState.bind(this))
-            .on('set', this.setPowerState.bind(this));
+
+        // Use the promise-based onGet/onSet handlers (Homebridge 1.3+).
+        // The old callback-based .on('get') / .on('set') pattern causes HomeKit
+        // to sometimes skip calling 'set' if it believes the state hasn't changed,
+        // which is why toggling the switch had no effect.
+        switchService.getCharacteristic(Characteristic.On)
+            .onGet(async () => {
+                const sensors = await this.getAllFilteredMotionSensors();
+                if (sensors.length === 0) {
+                    this.log.warn('No matching sensors found — check filter names match the Hue app exactly');
+                    return false;
+                }
+                const allOn = sensors.every(s => s.enabled);
+                for (const sensor of sensors) {
+                    this.log(`Sensor "${sensor.name}": enabled=${sensor.enabled}`);
+                }
+                return allOn;
+            })
+            .onSet(async (value) => {
+                this.log(`Setting all filtered sensors to enabled=${value}`);
+                const sensors = await this.getAllFilteredMotionSensors();
+                if (sensors.length === 0) {
+                    this.log.warn('No matching sensors found — nothing to set');
+                    return;
+                }
+                await Promise.all(
+                    sensors.map(sensor =>
+                        this.hueRequest(
+                            sensor.bridge,
+                            'PUT',
+                            `/resource/motion/${sensor.motionId}`,
+                            { enabled: Boolean(value) }
+                        )
+                        .then(() => {
+                            this.log(`Sensor "${sensor.name}": set enabled=${Boolean(value)}`);
+                        })
+                        .catch(error => {
+                            this.log.error(`Failed to update "${sensor.name}": ${error.message}`);
+                        })
+                    )
+                );
+            });
 
         return [informationService, switchService];
     }
