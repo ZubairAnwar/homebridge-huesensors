@@ -64,8 +64,17 @@ class HueSensorsAccessory {
                         if (this.filter.indexOf(sensor.name) > -1) {
                             if (sensor.type === 'ZLLPresence') {
                                 sensor.config.on = state;
-                                client.sensors.save(sensor);
-                                this.log(`Sensor [${sensor.id}]: ${sensor.name} On: ${sensor.config.on}`);
+                                // FIX 3: .catch() added to sensors.save() — without this,
+                                // a rejection from the Hue bridge (e.g. Hue Bridge 2
+                                // blocking v1 API config writes) is an unhandled rejection
+                                // that crashes the child bridge process.
+                                client.sensors.save(sensor)
+                                    .then(() => {
+                                        this.log(`Sensor [${sensor.id}]: ${sensor.name} On: ${sensor.config.on}`);
+                                    })
+                                    .catch(error => {
+                                        this.log.error(`Failed to save sensor [${sensor.id}] ${sensor.name}: ${error.message}`);
+                                    });
                             }
                         }
                     }
