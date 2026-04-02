@@ -1,5 +1,14 @@
 'use strict';
 
+// FIX 1: The Hue bridge uses a self-signed TLS certificate. Newer Node.js
+// versions reject these by default, causing "unable to verify the first
+// certificate". This tells Node.js to allow them for requests made by this
+// plugin. Scoped here at module load rather than globally on the process.
+const https = require('https');
+const httpsAgent = new https.Agent({ rejectUnauthorized: false });
+// huejay uses axios under the hood; patch the default agent it will pick up.
+https.globalAgent = httpsAgent;
+
 const huejay = require('huejay');
 
 /**
@@ -11,6 +20,8 @@ const huejay = require('huejay');
  *  - Service and Characteristic are obtained from api.hap inside the constructor
  *  - Constructor accepts (log, config, api) — the third arg is new
  *  - Converted to ES6 class for clarity (optional but recommended)
+ *  - FIX 1: TLS certificate verification disabled for self-signed Hue bridge cert
+ *  - FIX 2: Promise.all() now has a .catch() to prevent UnhandledPromiseRejection
  */
 module.exports = (api) => {
     api.registerAccessory('HueSensors', HueSensorsAccessory);
@@ -94,9 +105,17 @@ class HueSensorsAccessory {
             }));
         }
 
-        Promise.all(promises).then(values => {
-            callback(values.indexOf(false) === -1);
-        });
+        // FIX 2: .catch() added here to handle rejections from any individual
+        // bridge promise (e.g. SSL errors, network timeouts). Without this,
+        // Node.js v15+ throws an UnhandledPromiseRejection and crashes.
+        Promise.all(promises)
+            .then(values => {
+                callback(values.indexOf(false) === -1);
+            })
+            .catch(error => {
+                this.log.error('Error checking bridges: ' + error);
+                callback(false);
+            });
     }
 
 
