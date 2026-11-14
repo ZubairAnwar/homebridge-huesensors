@@ -111,7 +111,7 @@ class HueSensorsAccessory {
         informationService
             .setCharacteristic(Characteristic.Manufacturer, 'Signify')
             .setCharacteristic(Characteristic.Model,        'Hue Motion Sensor')
-            .setCharacteristic(Characteristic.SerialNumber, 'homebridge-huesensors');
+            .setCharacteristic(Characteristic.SerialNumber, this.config.serialNumber || `huesensors-${this.config.name || 'Hue Sensors'}`);
 
         const switchService = new Service.Switch(this.config.name || 'Hue Sensors');
 
